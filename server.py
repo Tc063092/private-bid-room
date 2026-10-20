@@ -33,6 +33,8 @@ def init():
   c.execute("INSERT OR IGNORE INTO settings (id,title,start_cents,increment_cents,closes_at,closed,started) VALUES(1,'Friends Private Auction',100000,10000,NULL,0,0)")
   c.execute('''CREATE TABLE IF NOT EXISTS member_admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, member_id INTEGER NOT NULL, old_name TEXT NOT NULL, new_name TEXT, action TEXT NOT NULL, had_bid INTEGER NOT NULL)''')
   c.execute('''CREATE TABLE IF NOT EXISTS archive_deletion_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER NOT NULL, auction_title TEXT NOT NULL, deleted_at INTEGER NOT NULL)''')
+  c.execute('''CREATE TABLE IF NOT EXISTS roulette_entries(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 1000000))''')
+  if 'roulette_result_json' not in [r['name'] for r in c.execute('PRAGMA table_info(settings)').fetchall()]: c.execute('ALTER TABLE settings ADD COLUMN roulette_result_json TEXT')
   c.executescript('''CREATE TABLE IF NOT EXISTS auction_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, archived_at INTEGER NOT NULL, title TEXT NOT NULL, start_cents INTEGER NOT NULL, increment_cents INTEGER NOT NULL, closes_at INTEGER, closed INTEGER NOT NULL, bids_json TEXT NOT NULL, winner_json TEXT); CREATE TABLE IF NOT EXISTS bid_removals(id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at INTEGER NOT NULL, member_id INTEGER NOT NULL, member_name TEXT NOT NULL, amount_cents INTEGER NOT NULL, visibility TEXT NOT NULL, reason TEXT NOT NULL);''')
 
 def money(v):
@@ -69,7 +71,7 @@ def state(c,member_id=None,admin=False):
  for r in rows:
   own=member_id==r['id']; see=admin or own or r['visibility']=='public'
   visible.append({'name':r['name'],'amount':r['amount_cents']/100 if see else None,'visibility':r['visibility'],'mine':own,'member_id':r['id'] if admin else None,'updated_at':r['updated_at'] if see else None})
- return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'member_limit':s['member_limit'],'approved_count':c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0],'members':[{'id':r['id'],'name':r['name'],'approved':bool(r['approved']),'has_bid':bool(r['has_bid'])} for r in c.execute('SELECT m.id,m.name,m.approved,EXISTS(SELECT 1 FROM bids b WHERE b.member_id=m.id) AS has_bid FROM members m ORDER BY m.id').fetchall()] if admin else [],'bids':visible,'winner':winner if closed else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
+ return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'member_limit':s['member_limit'],'approved_count':c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0],'members':[{'id':r['id'],'name':r['name'],'approved':bool(r['approved']),'has_bid':bool(r['has_bid'])} for r in c.execute('SELECT m.id,m.name,m.approved,EXISTS(SELECT 1 FROM bids b WHERE b.member_id=m.id) AS has_bid FROM members m ORDER BY m.id').fetchall()] if admin else [],'bids':visible,'winner':winner if closed else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'roulette_entries':[dict(r) for r in c.execute('SELECT id,name,weight FROM roulette_entries ORDER BY id').fetchall()] if admin else [],'roulette_result':({'name':json.loads(s['roulette_result_json'])['name'],'drawn_at':json.loads(s['roulette_result_json']).get('drawn_at')} if not admin else json.loads(s['roulette_result_json'])) if s['roulette_result_json'] else None,'roulette_names':[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id').fetchall()],'roulette_available':closed and not rows,'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
 
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,data,cookie=None):
@@ -237,6 +239,37 @@ class Handler(BaseHTTPRequestHandler):
      c.execute('INSERT INTO archive_deletion_audit(archive_id,auction_title,deleted_at) VALUES(?,?,?)',(row['id'],row['title'],int(time.time())))
      c.execute('DELETE FROM auction_archive WHERE id=?',(archive_id,))
      return self.send(200,{'ok':True})
+    if path=='/api/roulette-entries':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     s=c.execute('SELECT * FROM settings WHERE id=1').fetchone()
+     if s['roulette_result_json']: raise ValueError('Draw is finalized; create a new auction to change entries')
+     entries=data.get('entries')
+     if not isinstance(entries,list) or not 1<=len(entries)<=100: raise ValueError('Enter 1 to 100 names')
+     cleaned=[]; names=set()
+     for entry in entries:
+      name=str(entry.get('name','')).strip(); weight=entry.get('weight')
+      if not 1<=len(name)<=60 or name.casefold() in names: raise ValueError('Names must be unique and 1–60 characters')
+      if type(weight) is not int or not 1<=weight<=1000000: raise ValueError('Each weight must be a whole number from 1 to 1000000')
+      cleaned.append((name,weight)); names.add(name.casefold())
+     c.execute('DELETE FROM roulette_entries')
+     c.executemany('INSERT INTO roulette_entries(name,weight) VALUES(?,?)',cleaned)
+     return self.send(200,{'ok':True})
+    if path=='/api/roulette-spin':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     s=c.execute('SELECT * FROM settings WHERE id=1').fetchone()
+     if not (s['closed'] or (s['closes_at'] and time.time()>=s['closes_at'])): raise ValueError('Close the auction first')
+     if c.execute('SELECT COUNT(*) FROM bids').fetchone()[0]: raise ValueError('Roulette is only available when no member has bid')
+     if s['roulette_result_json']: return self.send(200,{'result':json.loads(s['roulette_result_json'])})
+     entries=c.execute('SELECT name,weight FROM roulette_entries ORDER BY id').fetchall()
+     if not entries: raise ValueError('Add participants first')
+     total=sum(e['weight'] for e in entries); ticket=secrets.randbelow(total)
+     selected=entries[-1]
+     for e in entries:
+      ticket-=e['weight']
+      if ticket<0: selected=e; break
+     result={'name':selected['name'],'weight':selected['weight'],'total_weight':total,'drawn_at':int(time.time())}
+     c.execute('UPDATE settings SET roulette_result_json=? WHERE id=1',(json.dumps(result),))
+     return self.send(200,{'result':result})
     if path=='/api/new-auction':
      if not a: return self.send(403,{'error':'Organizer login required'})
      title=str(data.get('title','')).strip()
@@ -249,9 +282,10 @@ class Handler(BaseHTTPRequestHandler):
      rows=c.execute('SELECT m.name,b.amount_cents,b.visibility,b.updated_at,b.id FROM bids b JOIN members m ON m.id=b.member_id ORDER BY b.id').fetchall()
      history=[dict(r) for r in rows]
      winner=finalize_winner(c)
-     c.execute('INSERT INTO auction_archive(archived_at,title,start_cents,increment_cents,closes_at,closed,bids_json,winner_json) VALUES(?,?,?,?,?,?,?,?)',(int(time.time()),old['title'],old['start_cents'],old['increment_cents'],old['closes_at'],int(bool(old['closed'] or (old['closes_at'] and time.time()>=old['closes_at']))),json.dumps(history),json.dumps(winner) if winner else None))
+     c.execute('INSERT INTO auction_archive(archived_at,title,start_cents,increment_cents,closes_at,closed,bids_json,winner_json) VALUES(?,?,?,?,?,?,?,?)',(int(time.time()),old['title'],old['start_cents'],old['increment_cents'],old['closes_at'],int(bool(old['closed'] or (old['closes_at'] and time.time()>=old['closes_at']))),json.dumps(history),json.dumps(winner) if winner else (old['roulette_result_json'] if old['roulette_result_json'] else None)))
      c.execute('DELETE FROM bids')
-     c.execute('UPDATE settings SET title=?,start_cents=?,increment_cents=?,closes_at=?,closed=0,started=0,winner_json=NULL WHERE id=1',(title,start,increment,close))
+     c.execute('DELETE FROM roulette_entries')
+     c.execute('UPDATE settings SET roulette_result_json=NULL,title=?,start_cents=?,increment_cents=?,closes_at=?,closed=0,started=0,winner_json=NULL WHERE id=1',(title,start,increment,close))
      return self.send(200,{'ok':True})
     if path=='/api/start':
      if not a: return self.send(403,{'error':'Organizer login required'})
