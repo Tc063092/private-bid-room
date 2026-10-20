@@ -43,6 +43,7 @@ def init():
    c.execute('DROP TABLE roulette_entries_legacy')
   c.execute('''CREATE TABLE IF NOT EXISTS roulette_saved_rounds(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,entries_json TEXT NOT NULL,saved_at INTEGER NOT NULL)''')
   if 'roulette_title' not in [r['name'] for r in c.execute('PRAGMA table_info(settings)').fetchall()]: c.execute("ALTER TABLE settings ADD COLUMN roulette_title TEXT NOT NULL DEFAULT 'Casino Roulette'")
+  c.execute('''CREATE TABLE IF NOT EXISTS roulette_history_deleted(drawn_at INTEGER NOT NULL,winner_name TEXT NOT NULL,PRIMARY KEY(drawn_at,winner_name))''')
   c.execute('''CREATE TABLE IF NOT EXISTS roulette_history(id INTEGER PRIMARY KEY AUTOINCREMENT, auction_title TEXT NOT NULL, winner_name TEXT NOT NULL, drawn_at INTEGER NOT NULL)''')
   for col in ('roulette_starts_at','roulette_ends_at'):
    if col not in [r['name'] for r in c.execute('PRAGMA table_info(settings)').fetchall()]: c.execute(f'ALTER TABLE settings ADD COLUMN {col} INTEGER')
@@ -84,7 +85,7 @@ def reconcile_roulette_history(c):
   winner=result['name']; drawn=int(result.get('drawn_at') or time.time())
  except (ValueError,KeyError,TypeError): return
  existing=c.execute('SELECT id FROM roulette_history WHERE winner_name=? AND drawn_at=?',(winner,drawn)).fetchone()
- if not existing:
+ if not existing and not c.execute('SELECT 1 FROM roulette_history_deleted WHERE drawn_at=? AND winner_name=?',(drawn,winner)).fetchone():
   names=[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id')]
   c.execute('INSERT INTO roulette_history(auction_title,winner_name,drawn_at,names_json) VALUES(?,?,?,?)',(s['roulette_title'] or 'Casino Roulette',winner,drawn,json.dumps(names)))
 
@@ -265,10 +266,18 @@ class Handler(BaseHTTPRequestHandler):
      c.execute('INSERT INTO archive_deletion_audit(archive_id,auction_title,deleted_at) VALUES(?,?,?)',(row['id'],row['title'],int(time.time())))
      c.execute('DELETE FROM auction_archive WHERE id=?',(archive_id,))
      return self.send(200,{'ok':True})
+    if path=='/api/roulette-delete-all-history':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     c.execute('INSERT OR IGNORE INTO roulette_history_deleted(drawn_at,winner_name) SELECT drawn_at,winner_name FROM roulette_history')
+     c.execute('DELETE FROM roulette_history')
+     return self.send(200,{'ok':True})
     if path=='/api/roulette-delete-history':
      if not a: return self.send(403,{'error':'Organizer login required'})
      rid=data.get('id')
      if type(rid) is not int: raise ValueError('Invalid history ID')
+     row=c.execute('SELECT drawn_at,winner_name FROM roulette_history WHERE id=?',(rid,)).fetchone()
+     if not row: raise ValueError('History record not found')
+     c.execute('INSERT OR IGNORE INTO roulette_history_deleted(drawn_at,winner_name) VALUES(?,?)',(row['drawn_at'],row['winner_name']))
      c.execute('DELETE FROM roulette_history WHERE id=?',(rid,))
      return self.send(200,{'ok':True})
     if path=='/api/roulette-title':
