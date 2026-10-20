@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: private-bid-room
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/state
+    disk:
+      name: auction-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: AUCTION_DB
+        value: /data/auction.sqlite3
+      - key: AUCTION_ADMIN_PASSWORD
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: '1'
