@@ -84,7 +84,7 @@ def state(c,member_id=None,admin=False):
  for r in rows:
   own=member_id==r['id']; see=admin or own or r['visibility']=='public'
   visible.append({'name':r['name'],'amount':r['amount_cents']/100 if see else None,'visibility':r['visibility'],'mine':own,'member_id':r['id'] if admin else None,'updated_at':r['updated_at'] if see else None})
- return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'member_limit':s['member_limit'],'approved_count':c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0],'members':[{'id':r['id'],'name':r['name'],'approved':bool(r['approved']),'has_bid':bool(r['has_bid'])} for r in c.execute('SELECT m.id,m.name,m.approved,EXISTS(SELECT 1 FROM bids b WHERE b.member_id=m.id) AS has_bid FROM members m ORDER BY m.id').fetchall()] if admin else [],'bids':visible,'winner':winner if closed else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'roulette_entries':[dict(r) for r in c.execute('SELECT id,name,weight FROM roulette_entries ORDER BY id').fetchall()] if admin else [],'roulette_result':({'name':json.loads(s['roulette_result_json'])['name'],'drawn_at':json.loads(s['roulette_result_json']).get('drawn_at')} if not admin else json.loads(s['roulette_result_json'])) if s['roulette_result_json'] else None,'roulette_names':[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id').fetchall()],'roulette_history':[{'id':r['id'],'auction_title':r['auction_title'],'winner_name':r['winner_name'],'drawn_at':r['drawn_at'],'names':json.loads(r['names_json']) if r['names_json'] else []} for r in c.execute('SELECT id,auction_title,winner_name,drawn_at,names_json FROM roulette_history ORDER BY id DESC LIMIT 100').fetchall()],'roulette_title':s['roulette_title'],'roulette_saved_rounds':[{'id':r['id'],'title':r['title'],'entries':json.loads(r['entries_json']),'saved_at':r['saved_at']} for r in c.execute('SELECT * FROM roulette_saved_rounds ORDER BY id DESC LIMIT 100').fetchall()] if admin else [],'roulette_available':True,'roulette_starts_at':s['roulette_starts_at'],'roulette_ends_at':s['roulette_ends_at'],'server_now':int(time.time()),'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
+ return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'member_limit':s['member_limit'],'approved_count':c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0],'members':[{'id':r['id'],'name':r['name'],'approved':bool(r['approved']),'has_bid':bool(r['has_bid'])} for r in c.execute('SELECT m.id,m.name,m.approved,EXISTS(SELECT 1 FROM bids b WHERE b.member_id=m.id) AS has_bid FROM members m ORDER BY m.id').fetchall()] if admin else [],'bids':visible,'winner':winner if closed else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'roulette_entries':[dict(r) for r in c.execute('SELECT id,name,weight FROM roulette_entries ORDER BY id').fetchall()] if admin else [],'roulette_result':({'name':json.loads(s['roulette_result_json'])['name'],'drawn_at':json.loads(s['roulette_result_json']).get('drawn_at')} if not admin else json.loads(s['roulette_result_json'])) if s['roulette_result_json'] else None,'roulette_names':[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id').fetchall()],'roulette_history':[{'id':r['id'],'auction_title':r['auction_title'],'winner_name':r['winner_name'],'drawn_at':r['drawn_at'],'names':json.loads(r['names_json']) if r['names_json'] else []} for r in c.execute('SELECT id,auction_title,winner_name,drawn_at,names_json FROM roulette_history ORDER BY id DESC LIMIT 3').fetchall()],'roulette_title':s['roulette_title'],'roulette_available':True,'roulette_starts_at':s['roulette_starts_at'],'roulette_ends_at':s['roulette_ends_at'],'server_now':int(time.time()),'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
 
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,data,cookie=None):
@@ -258,30 +258,12 @@ class Handler(BaseHTTPRequestHandler):
      if type(rid) is not int: raise ValueError('Invalid history ID')
      c.execute('DELETE FROM roulette_history WHERE id=?',(rid,))
      return self.send(200,{'ok':True})
-    if path=='/api/roulette-delete-saved':
-     if not a: return self.send(403,{'error':'Organizer login required'})
-     rid=data.get('id')
-     if type(rid) is not int: raise ValueError('Invalid saved round ID')
-     c.execute('DELETE FROM roulette_saved_rounds WHERE id=?',(rid,))
-     return self.send(200,{'ok':True})
     if path=='/api/roulette-title':
      if not a: return self.send(403,{'error':'Organizer login required'})
      title=str(data.get('title','')).strip()
      if not 1<=len(title)<=100: raise ValueError('Title must be 1–100 characters')
      if c.execute('SELECT roulette_result_json FROM settings WHERE id=1').fetchone()['roulette_result_json']: raise ValueError('Start a new spin to change title')
      c.execute('UPDATE settings SET roulette_title=? WHERE id=1',(title,))
-     return self.send(200,{'ok':True})
-    if path=='/api/roulette-load-saved':
-     if not a: return self.send(403,{'error':'Organizer login required'})
-     if c.execute('SELECT roulette_result_json FROM settings WHERE id=1').fetchone()['roulette_result_json']: raise ValueError('Start a new spin first')
-     rid=data.get('id')
-     if type(rid) is not int: raise ValueError('Invalid saved round ID')
-     row=c.execute('SELECT * FROM roulette_saved_rounds WHERE id=?',(rid,)).fetchone()
-     if not row: raise ValueError('Saved round not found')
-     entries=json.loads(row['entries_json'])
-     c.execute('DELETE FROM roulette_entries')
-     for e in entries: c.execute('INSERT INTO roulette_entries(name,weight) VALUES(?,?)',(e['name'],e['weight']))
-     c.execute('UPDATE settings SET roulette_title=? WHERE id=1',(row['title'],))
      return self.send(200,{'ok':True})
     if path=='/api/roulette-new-round':
      if not a: return self.send(403,{'error':'Organizer login required'})
@@ -332,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
      result={'name':selected['name'],'weight':selected['weight'],'total_weight':total,'drawn_at':int(time.time())}
      c.execute('UPDATE settings SET roulette_result_json=? WHERE id=1',(json.dumps(result),))
      c.execute('INSERT INTO roulette_history(auction_title,winner_name,drawn_at,names_json) VALUES(?,?,?,?)',(s['roulette_title'],result['name'],result['drawn_at'],json.dumps([e['name'] for e in entries])))
-     c.execute('INSERT INTO roulette_saved_rounds(title,entries_json,saved_at) VALUES(?,?,?)',(s['roulette_title'],json.dumps([dict(x) for x in c.execute('SELECT name,weight FROM roulette_entries ORDER BY id')]),int(time.time())))
+     c.execute('DELETE FROM roulette_history WHERE id NOT IN (SELECT id FROM roulette_history ORDER BY id DESC LIMIT 3)')
      return self.send(200,{'result':result})
     if path=='/api/new-auction':
      if not a: return self.send(403,{'error':'Organizer login required'})
