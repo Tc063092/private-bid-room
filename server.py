@@ -26,7 +26,10 @@ def init():
   columns=[r['name'] for r in c.execute('PRAGMA table_info(members)').fetchall()]
   if 'approved' not in columns: c.execute('ALTER TABLE members ADD COLUMN approved INTEGER NOT NULL DEFAULT 0')
   setting_columns=[r['name'] for r in c.execute('PRAGMA table_info(settings)').fetchall()]
+  if 'member_limit' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN member_limit INTEGER')
+  setting_columns=[r['name'] for r in c.execute('PRAGMA table_info(settings)').fetchall()]
   if 'started' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN started INTEGER NOT NULL DEFAULT 1')
+  if 'winner_json' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN winner_json TEXT')
   c.execute("INSERT OR IGNORE INTO settings (id,title,start_cents,increment_cents,closes_at,closed,started) VALUES(1,'Friends Private Auction',100000,10000,NULL,0,0)")
   c.executescript('''CREATE TABLE IF NOT EXISTS auction_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, archived_at INTEGER NOT NULL, title TEXT NOT NULL, start_cents INTEGER NOT NULL, increment_cents INTEGER NOT NULL, closes_at INTEGER, closed INTEGER NOT NULL, bids_json TEXT NOT NULL, winner_json TEXT); CREATE TABLE IF NOT EXISTS bid_removals(id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at INTEGER NOT NULL, member_id INTEGER NOT NULL, member_name TEXT NOT NULL, amount_cents INTEGER NOT NULL, visibility TEXT NOT NULL, reason TEXT NOT NULL);''')
 
@@ -39,15 +42,32 @@ def money(v):
   return cents
  except (InvalidOperation,ValueError,TypeError): raise ValueError('Enter a valid positive amount with at most 2 decimal places')
 
+def finalize_winner(c):
+ """Persist one cryptographically random draw for the tied highest bids."""
+ s=c.execute('SELECT * FROM settings WHERE id=1').fetchone()
+ if not (s['closed'] or (s['closes_at'] and time.time()>=s['closes_at'])):
+  return None
+ if s['winner_json'] is not None:
+  return json.loads(s['winner_json'])
+ rows=c.execute('SELECT m.name,b.amount_cents FROM bids b JOIN members m ON m.id=b.member_id').fetchall()
+ winner=None
+ if rows:
+  maximum=max(r['amount_cents'] for r in rows)
+  tied=[r for r in rows if r['amount_cents']==maximum]
+  selected=secrets.choice(tied)
+  winner={'name':selected['name'],'amount':maximum/100,'tie_count':len(tied),'tie_break':'random_draw' if len(tied)>1 else 'highest_bid'}
+ c.execute('UPDATE settings SET winner_json=? WHERE id=1 AND winner_json IS NULL',(json.dumps(winner),))
+ return winner
+
 def state(c,member_id=None,admin=False):
  s=c.execute('SELECT * FROM settings WHERE id=1').fetchone(); now=int(time.time()); closed=bool(s['closed'] or (s['closes_at'] and now>=s['closes_at']))
  rows=c.execute('SELECT m.id,m.name,b.amount_cents,b.visibility,b.updated_at,b.id AS bid_id FROM bids b JOIN members m ON m.id=b.member_id ORDER BY b.updated_at ASC,b.id ASC').fetchall()
- winner=sorted(rows,key=lambda r:(-r['amount_cents'],r['updated_at'],r['bid_id']))[0] if rows else None
+ winner=finalize_winner(c) if closed else None
  visible=[]
  for r in rows:
   own=member_id==r['id']; see=admin or own or r['visibility']=='public'
   visible.append({'name':r['name'],'amount':r['amount_cents']/100 if see else None,'visibility':r['visibility'],'mine':own,'member_id':r['id'] if admin else None,'updated_at':r['updated_at'] if see else None})
- return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'bids':visible,'winner':{'name':winner['name'],'amount':winner['amount_cents']/100} if closed and winner else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
+ return {'title':s['title'],'start':s['start_cents']/100,'increment':s['increment_cents']/100,'closes_at':s['closes_at'],'closed':closed,'started':bool(s['started']),'count':len(rows),'member_limit':s['member_limit'],'approved_count':c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0],'members':[{'id':r['id'],'name':r['name'],'approved':bool(r['approved']),'has_bid':bool(r['has_bid'])} for r in c.execute('SELECT m.id,m.name,m.approved,EXISTS(SELECT 1 FROM bids b WHERE b.member_id=m.id) AS has_bid FROM members m ORDER BY m.id').fetchall()] if admin else [],'bids':visible,'winner':winner if closed else None,'admin':admin,'logged_in':bool(member_id),'my_name':c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()['name'] if member_id else None,'approved':bool(c.execute('SELECT approved FROM members WHERE id=?',(member_id,)).fetchone()['approved']) if member_id else False,'archives':[{'id':r['id'],'title':r['title'],'archived_at':r['archived_at'],'winner':json.loads(r['winner_json']) if r['winner_json'] else None,'bid_count':len(json.loads(r['bids_json']))} for r in c.execute('SELECT * FROM auction_archive ORDER BY id DESC LIMIT 20').fetchall()] if admin else [],'pending_members':[dict(r) for r in c.execute('SELECT id,name FROM members WHERE approved=0 ORDER BY id').fetchall()] if admin else []}
 
 class Handler(BaseHTTPRequestHandler):
  def send(self,status,data,cookie=None):
@@ -72,8 +92,9 @@ class Handler(BaseHTTPRequestHandler):
   if path=='/':
    data=open(os.path.join(os.path.dirname(__file__),'index.html'),'rb').read(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
   if path=='/api/state':
-   with conn() as c:
-    m,a=self.auth(c); self.send(200,state(c,m,a)); return
+   with LOCK,conn() as c:
+    m,a=self.auth(c); result=state(c,m,a)
+   self.send(200,result); return
   self.send(404,{'error':'Not found'})
  def do_POST(self):
   path=urlparse(self.path).path
@@ -88,6 +109,8 @@ class Handler(BaseHTTPRequestHandler):
      name=str(data.get('name','')).strip(); pin=str(data.get('pin',''))
      if not 2<=len(name)<=50 or not 4<=len(pin)<=64: raise ValueError('Name must be 2–50 characters and PIN 4–64 characters')
      if c.execute('SELECT 1 FROM members WHERE name=?',(name,)).fetchone(): raise ValueError('Name already taken; log in instead')
+     limit=c.execute('SELECT member_limit FROM settings WHERE id=1').fetchone()['member_limit']
+     if limit is not None and c.execute('SELECT COUNT(*) FROM members').fetchone()[0]>=limit: raise ValueError('Member capacity reached; contact organizer')
      cur=c.execute('INSERT INTO members(name,pin_hash) VALUES(?,?)',(name,pw_hash(pin)))
      self.send(200,{'ok':True,'message':'Registration received. Wait for organizer approval before bidding.'},self.session(c,cur.lastrowid)); return
     if path=='/api/login':
@@ -115,10 +138,36 @@ class Handler(BaseHTTPRequestHandler):
      if amt<minimum: raise ValueError(f'Minimum allowed bid is RM {minimum/100:,.2f}')
      c.execute('INSERT INTO bids(member_id,amount_cents,visibility,updated_at) VALUES(?,?,?,?) ON CONFLICT(member_id) DO UPDATE SET amount_cents=excluded.amount_cents,visibility=excluded.visibility,updated_at=excluded.updated_at',(m,amt,vis,int(time.time())))
      return self.send(200,{'ok':True})
+    if path=='/api/create-member':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     name=str(data.get('name','')).strip(); pin=str(data.get('pin',''))
+     if not 2<=len(name)<=50 or not (pin.isdigit() and 4<=len(pin)<=12): raise ValueError('Username must be 2–50 characters and PIN must be 4–12 digits')
+     limit=c.execute('SELECT member_limit FROM settings WHERE id=1').fetchone()['member_limit']
+     if limit is not None and c.execute('SELECT COUNT(*) FROM members').fetchone()[0]>=limit: raise ValueError('Member capacity reached; increase total member limit first')
+     c.execute('INSERT INTO members(name,pin_hash,approved) VALUES(?,?,1)',(name,pw_hash(pin)))
+     return self.send(200,{'ok':True})
+    if path=='/api/member-limit':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     limit=int(data.get('member_limit',0))
+     if not 1<=limit<=10000: raise ValueError('Member limit must be between 1 and 10,000')
+     existing=c.execute('SELECT COUNT(*) FROM members').fetchone()[0]
+     if limit<existing: raise ValueError(f'Cannot set capacity below {existing} existing accounts')
+     c.execute('UPDATE settings SET member_limit=? WHERE id=1',(limit,))
+     return self.send(200,{'ok':True})
+    if path=='/api/reset-member-pin':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     member_id=int(data.get('member_id',0)); pin=str(data.get('pin',''))
+     if not (pin.isdigit() and 4<=len(pin)<=12): raise ValueError('PIN must be 4–12 digits')
+     cur=c.execute('UPDATE members SET pin_hash=? WHERE id=?',(pw_hash(pin),member_id))
+     if not cur.rowcount: raise ValueError('Member not found')
+     c.execute('DELETE FROM sessions WHERE member_id=?',(member_id,))
+     return self.send(200,{'ok':True})
     if path=='/api/approval':
      if not a: return self.send(403,{'error':'Organizer login required'})
      member_id=int(data.get('member_id',0)); action=data.get('action')
      if action=='approve':
+      limit=c.execute('SELECT member_limit FROM settings WHERE id=1').fetchone()['member_limit']
+      if limit is not None and c.execute('SELECT COUNT(*) FROM members WHERE approved=1').fetchone()[0]>=limit: raise ValueError('Approved member capacity reached')
       cur=c.execute('UPDATE members SET approved=1 WHERE id=? AND approved=0',(member_id,))
      elif action=='reject':
       if c.execute('SELECT 1 FROM bids WHERE member_id=?',(member_id,)).fetchone(): raise ValueError('Cannot reject a member with a bid')
@@ -160,10 +209,10 @@ class Handler(BaseHTTPRequestHandler):
      if not (old['closed'] or (old['closes_at'] and time.time()>=old['closes_at'])): raise ValueError('Close the current auction before creating a new one')
      rows=c.execute('SELECT m.name,b.amount_cents,b.visibility,b.updated_at,b.id FROM bids b JOIN members m ON m.id=b.member_id ORDER BY b.id').fetchall()
      history=[dict(r) for r in rows]
-     winner=sorted(history,key=lambda r:(-r['amount_cents'],r['updated_at'],r['id']))[0] if history else None
-     c.execute('INSERT INTO auction_archive(archived_at,title,start_cents,increment_cents,closes_at,closed,bids_json,winner_json) VALUES(?,?,?,?,?,?,?,?)',(int(time.time()),old['title'],old['start_cents'],old['increment_cents'],old['closes_at'],int(bool(old['closed'] or (old['closes_at'] and time.time()>=old['closes_at']))),json.dumps(history),json.dumps({'name':winner['name'],'amount':winner['amount_cents']/100}) if winner else None))
+     winner=finalize_winner(c)
+     c.execute('INSERT INTO auction_archive(archived_at,title,start_cents,increment_cents,closes_at,closed,bids_json,winner_json) VALUES(?,?,?,?,?,?,?,?)',(int(time.time()),old['title'],old['start_cents'],old['increment_cents'],old['closes_at'],int(bool(old['closed'] or (old['closes_at'] and time.time()>=old['closes_at']))),json.dumps(history),json.dumps(winner) if winner else None))
      c.execute('DELETE FROM bids')
-     c.execute('UPDATE settings SET title=?,start_cents=?,increment_cents=?,closes_at=?,closed=0,started=0 WHERE id=1',(title,start,increment,close))
+     c.execute('UPDATE settings SET title=?,start_cents=?,increment_cents=?,closes_at=?,closed=0,started=0,winner_json=NULL WHERE id=1',(title,start,increment,close))
      return self.send(200,{'ok':True})
     if path=='/api/start':
      if not a: return self.send(403,{'error':'Organizer login required'})
@@ -174,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
      return self.send(200,{'ok':True})
     if path=='/api/close':
      if not a: return self.send(403,{'error':'Organizer login required'})
-     c.execute('UPDATE settings SET closed=1 WHERE id=1'); return self.send(200,{'ok':True})
+     c.execute('UPDATE settings SET closed=1 WHERE id=1'); finalize_winner(c); return self.send(200,{'ok':True})
     return self.send(404,{'error':'Unknown action'})
   except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send(400,{'error':str(e)})
   except sqlite3.IntegrityError: return self.send(400,{'error':'Name already taken'})
