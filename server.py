@@ -133,11 +133,6 @@ class Handler(BaseHTTPRequestHandler):
      try: names=json.loads(r['names_json']) if r['names_json'] else []
      except (ValueError,TypeError): names=[]
      history.append({'id':r['id'],'title':r['auction_title'],'winner':r['winner_name'],'drawn_at':r['drawn_at'],'names':names})
-    if not history and setting['roulette_result_json']:
-     try:
-      result=json.loads(setting['roulette_result_json'])
-      history=[{'id':0,'title':setting['roulette_title'],'winner':result['name'],'drawn_at':result.get('drawn_at'),'names':[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id')]}]
-     except (ValueError,TypeError,KeyError): pass
     # For a new spin, previous completed winner remains the public result.
     title=history[0]['title'] if history else setting['roulette_title']
     self.send(200,{'title':title,'latest':history[0] if history else None,'history':history}); return
@@ -289,6 +284,7 @@ class Handler(BaseHTTPRequestHandler):
      if not a: return self.send(403,{'error':'Organizer login required'})
      c.execute('INSERT OR IGNORE INTO roulette_history_deleted(drawn_at,winner_name) SELECT drawn_at,winner_name FROM roulette_history')
      c.execute('DELETE FROM roulette_history')
+     c.execute('UPDATE settings SET roulette_result_json=NULL WHERE id=1')
      return self.send(200,{'ok':True})
     if path=='/api/roulette-delete-history':
      if not a: return self.send(403,{'error':'Organizer login required'})
@@ -298,6 +294,13 @@ class Handler(BaseHTTPRequestHandler):
      if not row: raise ValueError('History record not found')
      c.execute('INSERT OR IGNORE INTO roulette_history_deleted(drawn_at,winner_name) VALUES(?,?)',(row['drawn_at'],row['winner_name']))
      c.execute('DELETE FROM roulette_history WHERE id=?',(rid,))
+     setting=c.execute('SELECT roulette_result_json FROM settings WHERE id=1').fetchone()
+     if setting and setting['roulette_result_json']:
+      try:
+       current=json.loads(setting['roulette_result_json'])
+       if current.get('name')==row['winner_name'] and current.get('drawn_at')==row['drawn_at']:
+        c.execute('UPDATE settings SET roulette_result_json=NULL WHERE id=1')
+      except (ValueError,TypeError): pass
      return self.send(200,{'ok':True})
     if path=='/api/roulette-title':
      if not a: return self.send(403,{'error':'Organizer login required'})
