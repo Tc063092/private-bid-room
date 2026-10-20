@@ -122,6 +122,25 @@ class Handler(BaseHTTPRequestHandler):
   path=urlparse(self.path).path
   if path=='/':
    data=open(os.path.join(os.path.dirname(__file__),'index.html'),'rb').read(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+  if path=='/api/public-roulette':
+   # Deliberately public. Never include private weights or member credentials.
+   with LOCK,conn() as c:
+    reconcile_roulette_history(c)
+    setting=c.execute('SELECT roulette_title,roulette_result_json FROM settings WHERE id=1').fetchone()
+    rows=c.execute('SELECT id,auction_title,winner_name,drawn_at,names_json FROM roulette_history ORDER BY drawn_at DESC,id DESC').fetchall()
+    history=[]
+    for r in rows:
+     try: names=json.loads(r['names_json']) if r['names_json'] else []
+     except (ValueError,TypeError): names=[]
+     history.append({'id':r['id'],'title':r['auction_title'],'winner':r['winner_name'],'drawn_at':r['drawn_at'],'names':names})
+    if not history and setting['roulette_result_json']:
+     try:
+      result=json.loads(setting['roulette_result_json'])
+      history=[{'id':0,'title':setting['roulette_title'],'winner':result['name'],'drawn_at':result.get('drawn_at'),'names':[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id')]}]
+     except (ValueError,TypeError,KeyError): pass
+    # For a new spin, previous completed winner remains the public result.
+    title=history[0]['title'] if history else setting['roulette_title']
+    self.send(200,{'title':title,'latest':history[0] if history else None,'history':history}); return
   if path=='/api/state':
    with LOCK,conn() as c:
     m,a=self.auth(c); result=state(c,m,a)

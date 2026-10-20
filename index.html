@@ -97,6 +97,27 @@ $('board').innerHTML=s.bids.length?s.bids.map(b=>'<div class="row"><span>'+esc(b
 if(s.logged_in){const mine=s.bids.find(b=>b.mine);$('amount').min=(mine?mine.amount+s.increment:s.start).toFixed(2);$('amount').placeholder='Minimum '+fmt(mine?mine.amount+s.increment:s.start);if(!initialized){$('amount').value=(mine?mine.amount+s.increment:s.start).toFixed(2);if(mine)document.querySelector('input[name="visibility"][value="'+mine.visibility+'"]').checked=true;initialized=true}}
 if(s.admin){$('memberusage').textContent=s.approved_count+' approved / '+s.members.length+' registered'+(s.member_limit===null?' · No capacity set':' · '+s.member_limit+' maximum');$('memberlist').innerHTML=s.members.length?s.members.map(m=>'<div class="row"><span>'+esc(m.name)+' <small>'+(m.approved?'Approved':'Pending')+'</small></span><span class="actions" style="margin:0"><button class="secondary" onclick="renameMember('+m.id+')">Edit Username</button><button class="secondary" onclick="deleteMember('+m.id+')">Delete Member</button><button class="secondary" onclick="resetMemberPin('+m.id+','+JSON.stringify(m.name).replace(/"/g,'&quot;')+')">Reset PIN</button></span></div>').join(''):'<p class="muted">No members yet</p>';if(!initialized)$('memberlimit').value=s.member_limit||Math.max(10,s.members.length);$('pendingmembers').innerHTML=s.pending_members.length?s.pending_members.map(m=>'<div class="row"><span>'+esc(m.name)+'</span><span><button onclick="decideMember('+m.id+',\'approve\')">Approve</button> <button class="secondary" onclick="decideMember('+m.id+',\'reject\')">Reject</button></span></div>').join(''):'<p class="muted">No pending requests</p>';$('allbids').innerHTML=s.bids.length?s.bids.map(b=>'<div class="row"><span>'+esc(b.name)+' <small>('+esc(b.visibility)+')</small></span><span><strong>'+fmt(b.amount)+'</strong> <button class="secondary" onclick="removeBid('+b.member_id+','+JSON.stringify(b.name).replace(/"/g,'&quot;')+')">Remove Bid</button></span></div>').join(''):'No bids yet';if(!initialized){$('settingtitle').value=s.title;$('settingstart').value=s.start;$('settingincrement').value=s.increment;$('settingclose').value=s.closes_at?new Date(s.closes_at*1000-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'';initialized=true}$('closebtn').disabled=s.closed||!s.started;$('startbtn').disabled=s.closed||s.started;$('newauctionbtn').disabled=!s.closed;$('archives').innerHTML=s.archives.length?s.archives.map(a=>'<div class="row"><span>'+esc(a.title)+' · '+a.bid_count+' bids</span><span>'+(a.winner?esc(a.winner.name)+' — '+fmt(a.winner.amount):'No winner')+' <button class="secondary archive-delete" onclick="deleteArchive('+a.id+')">Delete History</button></span></div>').join(''):'No previous auctions'}
 }catch(e){console.error(e)}}refresh();setInterval(refresh,5000);setInterval(updateCountdown,1000);
+// Dedicated public roulette feed works without login and survives page reload.
+let publicRouletteData=null;
+async function loadPublicRoulette(){
+ try{
+  const response=await fetch('/api/public-roulette',{cache:'no-store',credentials:'omit'});
+  if(!response.ok)throw Error('Public roulette request failed: '+response.status);
+  const data=await response.json();publicRouletteData=data;
+  const latest=data.latest;
+  const title=$('public-roulette-title'),result=$('public-roulette-result'),history=$('public-spin-history-list'),button=$('public-roulette-replay');
+  if(title)title.textContent='🎡 '+(latest?.title||data.title||'Casino Roulette');
+  if(history)history.innerHTML=(data.history||[]).length?data.history.map(r=>'<div class="roulette-history-entry"><span><strong>'+esc(r.title)+'</strong><br>🏆 '+esc(r.winner)+'<br><small>'+(r.drawn_at?new Date(r.drawn_at*1000).toLocaleString():'')+'</small></span></div>').join(''):'<p class="muted">No previous spins yet / 暂无转盘历史</p>';
+  if(result&&!replayBusy)result.textContent=latest?'🏆 Winner / 获胜者: '+latest.winner:'Awaiting roulette result / 等待抽签结果';
+  if(button)button.style.display=latest?.names?.includes(latest.winner)?'inline-block':'none';
+  if(latest?.names?.length&&!replayBusy){
+   const wheel=$('public-roulette-wheel');const key=JSON.stringify(latest.names);
+   if(wheel&&wheel.dataset.namesKey!==key){paintCasinoWheel('public-roulette-wheel',latest.names);wheel.dataset.namesKey=key;}
+  }
+ }catch(e){console.error('Public roulette:',e);const result=$('public-roulette-result');if(result&&!publicRouletteData)result.textContent='Unable to load roulette results. Please refresh / 无法加载结果';}
+}
+// Display immediately, regardless of login status. Poll for newly completed spins.
+loadPublicRoulette();setInterval(loadPublicRoulette,4000);
 document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.historyDelete)deleteRouletteHistory(Number(b.dataset.historyDelete));if(b.dataset.savedLoad)loadSavedRoulette(Number(b.dataset.savedLoad));if(b.dataset.savedDelete)deleteSavedRoulette(Number(b.dataset.savedDelete))});
 </script><script>
 function paintAuctionDisplay(){
@@ -207,15 +228,15 @@ async function spinRoulette(){if(!confirm(currentLanguage==='zh'?'确认抽签�
 let replayBusy=false;
 function replayRoulette(){
  if(replayBusy)return;
- const latest=(current?.roulette_history||[])[0];if(!latest)return;
- const names=latest.names||[];const idx=names.indexOf(latest.winner_name);
+ const latest=publicRouletteData?.latest;if(!latest)return;
+ const names=latest.names||[];const idx=names.indexOf(latest.winner);
  if(idx<0||!names.length)return;
  replayBusy=true;
  const btn=$('public-roulette-replay');btn.disabled=true;
  const wheel=$('public-roulette-wheel'),ball=$('public-ball-orbit');
- paintCasinoWheel('public-roulette-wheel',names);spinBallToWinner(ball,wheel,names,latest.winner_name);
+ paintCasinoWheel('public-roulette-wheel',names);spinBallToWinner(ball,wheel,names,latest.winner);
  $('public-roulette-result').textContent=currentLanguage==='zh'?'🎬 正在重播...':'🎬 Replaying...';
- setTimeout(()=>{replayBusy=false;btn.disabled=false;$('public-roulette-result').textContent=(currentLanguage==='zh'?'🎉 获胜者：':'🎉 Winner: ')+latest.winner_name},7100);
+ setTimeout(()=>{replayBusy=false;btn.disabled=false;$('public-roulette-result').textContent=(currentLanguage==='zh'?'🎉 获胜者：':'🎉 Winner: ')+latest.winner},7100);
 }
 function renderPublicSpinHistory(){
  const list=$('public-spin-history-list');if(!list||!current)return;
@@ -225,11 +246,7 @@ function renderPublicSpinHistory(){
 const rouletteOldRefresh=refresh;refresh=async function(){await rouletteOldRefresh();if(!current)return;
 const history=Array.isArray(current.roulette_history)?current.roulette_history:[];
 
-renderPublicSpinHistory();
-const latest=history[0]||null;const liveNames=current.roulette_names||[];const names=(latest?.names?.length?latest.names:liveNames);const pub=$('public-roulette');$('public-roulette-replay').style.display=latest?.names?.includes(latest.winner_name)?'inline-block':'none';pub.classList.toggle('hidden',false);$('public-roulette-title').textContent='🎡 '+(latest?.auction_title||current.roulette_title||'Casino Roulette');
-if(names.length){paintCasinoWheel('public-roulette-wheel',names);if(!replayBusy)$('public-roulette-result').textContent=(latest?((currentLanguage==='zh'?'🎉 最新获胜者：':'🎉 Latest winner: ')+latest.winner_name):(currentLanguage==='zh'?'等待抽签结果':'Awaiting roulette result'));}
 
-if(!names.length){$('public-roulette-result').textContent=latest?((currentLanguage==='zh'?'🎉 最新获胜者：':'🎉 Latest winner: ')+latest.winner_name):(currentLanguage==='zh'?'等待抽签结果':'Awaiting roulette result');}
 const e=current.roulette_entries||[];if(current.admin){$('roulette-new-round').disabled=!current.roulette_result;if(document.activeElement!==$('roulette-title-input'))$('roulette-title-input').value=current.roulette_title||'';if(document.activeElement!==$('roulette-input'))$('roulette-input').value=e.map(x=>x.name+','+(e.reduce((a,b)=>a+b.weight,0)?(100*x.weight/e.reduce((a,b)=>a+b.weight,0)).toFixed(2):'0')).join('\n');$('roulette-editor').style.display=current.roulette_result?'none':'block';$('roulette-spin').disabled=!current.roulette_available||!!current.roulette_result||!e.length;drawRoulette();
 $('roulette-admin-history').innerHTML=history.length?history.map(r=>'<div class="roulette-history-entry"><span><strong>'+esc(r.auction_title)+'</strong> — 🏆 '+esc(r.winner_name)+'<br><small>'+new Date(r.drawn_at*1000).toLocaleString()+'</small></span><button class="secondary" data-history-delete="'+r.id+'">Delete</button></div>').join(''):'<p class="muted">No history</p>';
 $('roulette-message').textContent=current.roulette_result?((currentLanguage==='zh'?'🎉 抽签获胜者：':'🎉 Roulette winner: ')+current.roulette_result.name):current.roulette_available?'Ready for draw / 随时可以抽签':'Draw unavailable / 暂时无法抽签';}}
