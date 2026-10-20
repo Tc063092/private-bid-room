@@ -32,6 +32,7 @@ def init():
   if 'winner_json' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN winner_json TEXT')
   c.execute("INSERT OR IGNORE INTO settings (id,title,start_cents,increment_cents,closes_at,closed,started) VALUES(1,'Friends Private Auction',100000,10000,NULL,0,0)")
   c.execute('''CREATE TABLE IF NOT EXISTS member_admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, member_id INTEGER NOT NULL, old_name TEXT NOT NULL, new_name TEXT, action TEXT NOT NULL, had_bid INTEGER NOT NULL)''')
+  c.execute('''CREATE TABLE IF NOT EXISTS archive_deletion_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER NOT NULL, auction_title TEXT NOT NULL, deleted_at INTEGER NOT NULL)''')
   c.executescript('''CREATE TABLE IF NOT EXISTS auction_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, archived_at INTEGER NOT NULL, title TEXT NOT NULL, start_cents INTEGER NOT NULL, increment_cents INTEGER NOT NULL, closes_at INTEGER, closed INTEGER NOT NULL, bids_json TEXT NOT NULL, winner_json TEXT); CREATE TABLE IF NOT EXISTS bid_removals(id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at INTEGER NOT NULL, member_id INTEGER NOT NULL, member_name TEXT NOT NULL, amount_cents INTEGER NOT NULL, visibility TEXT NOT NULL, reason TEXT NOT NULL);''')
 
 def money(v):
@@ -226,6 +227,15 @@ class Handler(BaseHTTPRequestHandler):
      if not row: raise ValueError('Bid not found')
      c.execute('INSERT INTO bid_removals(removed_at,member_id,member_name,amount_cents,visibility,reason) VALUES(?,?,?,?,?,?)',(int(time.time()),member_id,row['name'],row['amount_cents'],row['visibility'],reason))
      c.execute('DELETE FROM bids WHERE member_id=?',(member_id,))
+     return self.send(200,{'ok':True})
+    if path=='/api/delete-archive':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     archive_id=int(data.get('archive_id',0))
+     row=c.execute('SELECT id,title FROM auction_archive WHERE id=?',(archive_id,)).fetchone()
+     if not row: raise ValueError('Archived auction not found')
+     if str(data.get('confirm_title',''))!=row['title']: raise ValueError('Auction title confirmation does not match')
+     c.execute('INSERT INTO archive_deletion_audit(archive_id,auction_title,deleted_at) VALUES(?,?,?)',(row['id'],row['title'],int(time.time())))
+     c.execute('DELETE FROM auction_archive WHERE id=?',(archive_id,))
      return self.send(200,{'ok':True})
     if path=='/api/new-auction':
      if not a: return self.send(403,{'error':'Organizer login required'})
