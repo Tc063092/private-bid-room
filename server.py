@@ -31,6 +31,7 @@ def init():
   if 'started' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN started INTEGER NOT NULL DEFAULT 1')
   if 'winner_json' not in setting_columns: c.execute('ALTER TABLE settings ADD COLUMN winner_json TEXT')
   c.execute("INSERT OR IGNORE INTO settings (id,title,start_cents,increment_cents,closes_at,closed,started) VALUES(1,'Friends Private Auction',100000,10000,NULL,0,0)")
+  c.execute('''CREATE TABLE IF NOT EXISTS member_admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, member_id INTEGER NOT NULL, old_name TEXT NOT NULL, new_name TEXT, action TEXT NOT NULL, had_bid INTEGER NOT NULL)''')
   c.executescript('''CREATE TABLE IF NOT EXISTS auction_archive(id INTEGER PRIMARY KEY AUTOINCREMENT, archived_at INTEGER NOT NULL, title TEXT NOT NULL, start_cents INTEGER NOT NULL, increment_cents INTEGER NOT NULL, closes_at INTEGER, closed INTEGER NOT NULL, bids_json TEXT NOT NULL, winner_json TEXT); CREATE TABLE IF NOT EXISTS bid_removals(id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at INTEGER NOT NULL, member_id INTEGER NOT NULL, member_name TEXT NOT NULL, amount_cents INTEGER NOT NULL, visibility TEXT NOT NULL, reason TEXT NOT NULL);''')
 
 def money(v):
@@ -153,6 +154,34 @@ class Handler(BaseHTTPRequestHandler):
      existing=c.execute('SELECT COUNT(*) FROM members').fetchone()[0]
      if limit<existing: raise ValueError(f'Cannot set capacity below {existing} existing accounts')
      c.execute('UPDATE settings SET member_limit=? WHERE id=1',(limit,))
+     return self.send(200,{'ok':True})
+    if path=='/api/rename-member':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     member_id=int(data.get('member_id',0)); new_name=str(data.get('name','')).strip()
+     if not 2<=len(new_name)<=50: raise ValueError('Username must be 2–50 characters')
+     row=c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()
+     if not row: raise ValueError('Member not found')
+     if c.execute('SELECT 1 FROM members WHERE name=? AND id<>?',(new_name,member_id)).fetchone(): raise ValueError('Username already taken')
+     if row['name']!=new_name:
+      has_bid=int(bool(c.execute('SELECT 1 FROM bids WHERE member_id=?',(member_id,)).fetchone()))
+      c.execute('UPDATE members SET name=? WHERE id=?',(new_name,member_id))
+      c.execute('INSERT INTO member_admin_audit(created_at,member_id,old_name,new_name,action,had_bid) VALUES(?,?,?,?,?,?)',(int(time.time()),member_id,row['name'],new_name,'rename',has_bid))
+     return self.send(200,{'ok':True})
+    if path=='/api/delete-member':
+     if not a: return self.send(403,{'error':'Organizer login required'})
+     member_id=int(data.get('member_id',0))
+     row=c.execute('SELECT name FROM members WHERE id=?',(member_id,)).fetchone()
+     if not row: raise ValueError('Member not found')
+     s=c.execute('SELECT * FROM settings WHERE id=1').fetchone()
+     if s['closed'] or (s['closes_at'] and time.time()>=s['closes_at']):
+      raise ValueError('Auction is closed. Create a new round before deleting members to preserve the result.')
+     bid=c.execute('SELECT * FROM bids WHERE member_id=?',(member_id,)).fetchone()
+     if bid:
+      c.execute('INSERT INTO bid_removals(removed_at,member_id,member_name,amount_cents,visibility,reason) VALUES(?,?,?,?,?,?)',(int(time.time()),member_id,row['name'],bid['amount_cents'],bid['visibility'],'Member account deleted by organizer'))
+     c.execute('INSERT INTO member_admin_audit(created_at,member_id,old_name,new_name,action,had_bid) VALUES(?,?,?,?,?,?)',(int(time.time()),member_id,row['name'],None,'delete',int(bool(bid))))
+     c.execute('DELETE FROM bids WHERE member_id=?',(member_id,))
+     c.execute('DELETE FROM sessions WHERE member_id=?',(member_id,))
+     c.execute('DELETE FROM members WHERE id=?',(member_id,))
      return self.send(200,{'ok':True})
     if path=='/api/reset-member-pin':
      if not a: return self.send(403,{'error':'Organizer login required'})
