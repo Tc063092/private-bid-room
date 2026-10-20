@@ -76,7 +76,20 @@ def finalize_winner(c):
  c.execute('UPDATE settings SET winner_json=? WHERE id=1 AND winner_json IS NULL',(json.dumps(winner),))
  return winner
 
+def reconcile_roulette_history(c):
+ s=c.execute('SELECT roulette_result_json,roulette_title FROM settings WHERE id=1').fetchone()
+ if not s or not s['roulette_result_json']: return
+ try:
+  result=json.loads(s['roulette_result_json'])
+  winner=result['name']; drawn=int(result.get('drawn_at') or time.time())
+ except (ValueError,KeyError,TypeError): return
+ existing=c.execute('SELECT id FROM roulette_history WHERE winner_name=? AND drawn_at=?',(winner,drawn)).fetchone()
+ if not existing:
+  names=[r['name'] for r in c.execute('SELECT name FROM roulette_entries ORDER BY id')]
+  c.execute('INSERT INTO roulette_history(auction_title,winner_name,drawn_at,names_json) VALUES(?,?,?,?)',(s['roulette_title'] or 'Casino Roulette',winner,drawn,json.dumps(names)))
+
 def state(c,member_id=None,admin=False):
+ reconcile_roulette_history(c)
  s=c.execute('SELECT * FROM settings WHERE id=1').fetchone(); now=int(time.time()); closed=bool(s['closed'] or (s['closes_at'] and now>=s['closes_at']))
  rows=c.execute('SELECT m.id,m.name,b.amount_cents,b.visibility,b.updated_at,b.id AS bid_id FROM bids b JOIN members m ON m.id=b.member_id ORDER BY b.updated_at ASC,b.id ASC').fetchall()
  winner=finalize_winner(c) if closed else None

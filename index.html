@@ -195,6 +195,8 @@ function drawRoulette(){const e=current?.roulette_entries||[];const sum=e.reduce
 async function saveRoulette(){try{const entries=rouletteEntries();if(entries.reduce((sum,e)=>sum+e.weight,0)!==10000)throw Error('Total must equal 100% / 百分比总和必须等于100%');await api('roulette-entries',{entries});$('roulette-message').textContent=currentLanguage==='zh'?'已保存名单和概率':'Participants and probabilities saved';await refresh();}catch(e){$('roulette-message').textContent=e.message}}
 async function spinRoulette(){if(!confirm(currentLanguage==='zh'?'确认抽签？结果将永久保存。':'Spin now? The result will be saved permanently.'))return;try{
  const r=await api('roulette-spin',{});
+ // Show the server-confirmed result immediately in history; ball continues its animation.
+ await refresh();
  const entries=current.roulette_entries||[];
  spinBallToWinner($('admin-ball-orbit'),$('roulette-wheel'),entries.map(e=>e.name),r.result.name);
  $('roulette-spin').disabled=true;
@@ -238,13 +240,15 @@ function renderPublicSpinHistory(){
  list.innerHTML=rows.length?rows.map((r,i)=>'<div class="roulette-history-entry"><span><strong>'+esc(r.auction_title)+'</strong> · '+esc(r.winner_name)+'<br><small>'+new Date(r.drawn_at*1000).toLocaleString()+'</small></span><button class="secondary" data-history-replay="'+r.id+'" '+(!r.names?.length||!r.names.includes(r.winner_name)?'disabled title="Participant list unavailable"':'')+'>'+(currentLanguage==='zh'?'↻ 重播':'↻ Replay')+'</button></div>').join(''):'<p class="muted">'+(currentLanguage==='zh'?'暂无转盘历史':'No previous spins yet')+'</p>';
 }
 const rouletteOldRefresh=refresh;refresh=async function(){await rouletteOldRefresh();if(!current)return;
-const history=current.roulette_history||[];renderPublicSpinHistory();
-const latest=history[0]||null;const liveNames=current.roulette_names||[];const names=liveNames.length?liveNames:(latest?.names||[]);const pub=$('public-roulette');$('public-roulette-replay').style.display=latest?.names?.includes(latest.winner_name)?'inline-block':'none';pub.classList.toggle('hidden',false);$('public-roulette-title').textContent='🎡 '+(liveNames.length?current.roulette_title:(latest?.auction_title||current.roulette_title||'Casino Roulette'));
+const history=Array.isArray(current.roulette_history)?current.roulette_history:[];
+if(!history.length&&current.roulette_result?.name){history.push({id:0,auction_title:current.roulette_title||'Casino Roulette',winner_name:current.roulette_result.name,drawn_at:current.roulette_result.drawn_at||Math.floor(Date.now()/1000),names:current.roulette_names||[]})}
+renderPublicSpinHistory();
+const latest=history[0]||null;const liveNames=current.roulette_names||[];const names=(latest?.names?.length?latest.names:liveNames);const pub=$('public-roulette');$('public-roulette-replay').style.display=latest?.names?.includes(latest.winner_name)?'inline-block':'none';pub.classList.toggle('hidden',false);$('public-roulette-title').textContent='🎡 '+(latest?.auction_title||current.roulette_title||'Casino Roulette');
 if(names.length){$('public-roulette-names').textContent=names.join(' · ');paintCasinoWheel('public-roulette-wheel',names);if(!replayBusy)$('public-roulette-result').textContent=(latest?((currentLanguage==='zh'?'🎉 最新获胜者：':'🎉 Latest winner: ')+latest.winner_name):(currentLanguage==='zh'?'等待抽签结果':'Awaiting roulette result'));}
 
-if(!names.length){$('public-roulette-names').textContent='';$('public-roulette-result').textContent=currentLanguage==='zh'?'等待抽签结果':'Awaiting roulette result';}
+if(!names.length){$('public-roulette-names').textContent='';$('public-roulette-result').textContent=latest?((currentLanguage==='zh'?'🎉 最新获胜者：':'🎉 Latest winner: ')+latest.winner_name):(currentLanguage==='zh'?'等待抽签结果':'Awaiting roulette result');}
 const e=current.roulette_entries||[];if(current.admin){$('roulette-new-round').disabled=!current.roulette_result;if(document.activeElement!==$('roulette-title-input'))$('roulette-title-input').value=current.roulette_title||'';if(document.activeElement!==$('roulette-input'))$('roulette-input').value=e.map(x=>x.name+','+(e.reduce((a,b)=>a+b.weight,0)?(100*x.weight/e.reduce((a,b)=>a+b.weight,0)).toFixed(2):'0')).join('\n');$('roulette-editor').style.display=current.roulette_result?'none':'block';$('roulette-spin').disabled=!current.roulette_available||!!current.roulette_result||!e.length;drawRoulette();
-$('roulette-admin-history').innerHTML=history.length?history.map(r=>'<div class="roulette-history-entry"><span>'+esc(r.auction_title)+' — '+esc(r.winner_name)+'</span><button class="secondary" data-history-delete="'+r.id+'">Delete</button></div>').join(''):'<p class="muted">No history</p>';
+$('roulette-admin-history').innerHTML=history.length?history.map(r=>'<div class="roulette-history-entry"><span><strong>'+esc(r.auction_title)+'</strong> — 🏆 '+esc(r.winner_name)+'<br><small>'+new Date(r.drawn_at*1000).toLocaleString()+'</small></span><button class="secondary" data-history-delete="'+r.id+'">Delete</button></div>').join(''):'<p class="muted">No history</p>';
 $('roulette-message').textContent=current.roulette_result?((currentLanguage==='zh'?'🎉 抽签获胜者：':'🎉 Roulette winner: ')+current.roulette_result.name):current.roulette_available?'Ready for draw / 随时可以抽签':'Draw unavailable / 暂时无法抽签';}}
 document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.historyReplay)replayHistory(Number(b.dataset.historyReplay));if(b.dataset.historyDelete)deleteRouletteHistory(Number(b.dataset.historyDelete));if(b.dataset.savedLoad)loadSavedRoulette(Number(b.dataset.savedLoad));if(b.dataset.savedDelete)deleteSavedRoulette(Number(b.dataset.savedDelete))});
 </script></body></html>
